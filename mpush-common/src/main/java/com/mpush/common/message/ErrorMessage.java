@@ -25,6 +25,9 @@ import com.mpush.common.ErrorCode;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFutureListener;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import static com.mpush.api.protocol.Command.ERROR;
 
 /**
@@ -63,13 +66,22 @@ public final class ErrorMessage extends ByteBufMessage {
         encodeString(body, data);
     }
 
+    @Override
+    protected Map<String, Object> encodeJsonBody() {
+        Map<String, Object> body = new HashMap<>(4);
+        if (cmd > 0) body.put("cmd", cmd);
+        if (code > 0) body.put("code", code);
+        if (reason != null) body.put("reason", reason);
+        if (data != null) body.put("data", data);
+        return body;
+    }
+
     public static ErrorMessage from(BaseMessage src) {
-        return new ErrorMessage(src.packet.cmd, new Packet(ERROR
-                , src.packet.sessionId), src.connection);
+        return new ErrorMessage(src.packet.cmd, src.packet.response(ERROR), src.connection);
     }
 
     public static ErrorMessage from(Packet src, Connection connection) {
-        return new ErrorMessage(src.cmd, new Packet(ERROR, src.sessionId), connection);
+        return new ErrorMessage(src.cmd, src.response(ERROR), connection);
     }
 
 

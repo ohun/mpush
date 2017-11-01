@@ -31,10 +31,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class RequestContext implements TimerTask, HttpCallback {
     private static final int TIMEOUT = CC.mp.http.default_read_timeout;
+    private final long startTime = System.currentTimeMillis();
     final AtomicBoolean cancelled = new AtomicBoolean(false);
-    final long startTime = System.currentTimeMillis();
     final int readTimeout;
-    long endTime = startTime;
+    private long endTime = startTime;
     private String uri;
     private HttpCallback callback;
     FullHttpRequest request;
@@ -48,8 +48,9 @@ public class RequestContext implements TimerTask, HttpCallback {
     }
 
     private int parseTimeout() {
-        String timeout = request.headers().getAndRemoveAndConvert(Constants.HTTP_HEAD_READ_TIMEOUT);
+        String timeout = request.headers().get(Constants.HTTP_HEAD_READ_TIMEOUT);
         if (timeout != null) {
+            request.headers().remove(Constants.HTTP_HEAD_READ_TIMEOUT);
             Integer integer = Ints.tryParse(timeout);
             if (integer != null && integer > 0) {
                 return integer;

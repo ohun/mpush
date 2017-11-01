@@ -19,14 +19,21 @@
 
 package com.mpush.netty.codec;
 
-import com.mpush.api.protocol.Command;
 import com.mpush.api.protocol.Packet;
+import com.mpush.api.protocol.JsonPacket;
+import com.mpush.api.protocol.UDPPacket;
+import com.mpush.tools.Jsons;
 import com.mpush.tools.config.CC;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.codec.ByteToMessageDecoder;
+import io.netty.handler.codec.TooLongFrameException;
 
+import java.util.HashMap;
 import java.util.List;
+
+import static com.mpush.api.protocol.Packet.decodePacket;
 
 /**
  * Created by ohun on 2015/12/19.
@@ -46,7 +53,7 @@ public final class PacketDecoder extends ByteToMessageDecoder {
     private void decodeHeartbeat(ByteBuf in, List<Object> out) {
         while (in.isReadable()) {
             if (in.readByte() == Packet.HB_PACKET_BYTE) {
-                out.add(Packet.HB_PACKE);
+                out.add(Packet.HB_PACKET);
             } else {
                 in.readerIndex(in.readerIndex() - 1);
                 break;
@@ -54,48 +61,47 @@ public final class PacketDecoder extends ByteToMessageDecoder {
         }
     }
 
-    private void decodeFrames(ByteBuf in, List<Object> out) throws Exception {
-        try {
-            while (in.readableBytes() >= Packet.HEADER_LEN) {
-                //1.记录当前读取位置位置.如果读取到非完整的frame,要恢复到该位置,便于下次读取
-                in.markReaderIndex();
-                out.add(decodeFrame(in));
+    private void decodeFrames(ByteBuf in, List<Object> out) {
+        if (in.readableBytes() >= Packet.HEADER_LEN) {
+            //1.记录当前读取位置位置.如果读取到非完整的frame,要恢复到该位置,便于下次读取
+            in.markReaderIndex();
+
+            Packet packet = decodeFrame(in);
+            if (packet != null) {
+                out.add(packet);
+            } else {
+                //2.读取到不完整的frame,恢复到最近一次正常读取的位置,便于下次读取
+                in.resetReaderIndex();
             }
-        } catch (DecodeException e) {
-            //2.读取到不完整的frame,恢复到最近一次正常读取的位置,便于下次读取
-            in.resetReaderIndex();
         }
     }
 
-    private Packet decodeFrame(ByteBuf in) throws Exception {
-        int bufferSize = in.readableBytes();
+    private Packet decodeFrame(ByteBuf in) {
+        int readableBytes = in.readableBytes();
         int bodyLength = in.readInt();
-        if (bufferSize < (bodyLength + Packet.HEADER_LEN)) {
-            throw new DecodeException("invalid frame");
+        if (readableBytes < (bodyLength + Packet.HEADER_LEN)) {
+            return null;
         }
-        return readPacket(in, bodyLength);
+        if (bodyLength > maxPacketSize) {
+            throw new TooLongFrameException("packet body length over limit:" + bodyLength);
+        }
+        return decodePacket(new Packet(in.readByte()), in, bodyLength);
     }
 
-    private Packet readPacket(ByteBuf in, int bodyLength) {
-        byte command = in.readByte();
-        short cc = in.readShort();
-        byte flags = in.readByte();
-        int sessionId = in.readInt();
-        byte lrc = in.readByte();
-        byte[] body = null;
-        if (bodyLength > 0) {
-            if (bodyLength > maxPacketSize) {
-                throw new RuntimeException("ERROR PACKET_SIZE：" + bodyLength);
-            }
-            body = new byte[bodyLength];
-            in.readBytes(body);
+    public static Packet decodeFrame(DatagramPacket frame) {
+        ByteBuf in = frame.content();
+        int readableBytes = in.readableBytes();
+        int bodyLength = in.readInt();
+        if (readableBytes < (bodyLength + Packet.HEADER_LEN)) {
+            return null;
         }
-        Packet packet = new Packet(command);
-        packet.cc = cc;
-        packet.flags = flags;
-        packet.sessionId = sessionId;
-        packet.lrc = lrc;
-        packet.body = body;
-        return packet;
+
+        return decodePacket(new UDPPacket(in.readByte()
+                , frame.sender()), in, bodyLength);
+    }
+
+    public static Packet decodeFrame(String frame) throws Exception {
+        if (frame == null) return null;
+        return Jsons.fromJson(frame, JsonPacket.class);
     }
 }

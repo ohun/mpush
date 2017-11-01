@@ -19,91 +19,97 @@
 
 package com.mpush.client.push;
 
-import com.mpush.api.Constants;
-import com.mpush.api.connection.Connection;
+import com.mpush.api.MPushContext;
+import com.mpush.api.push.PushContext;
+import com.mpush.api.push.PushException;
+import com.mpush.api.push.PushResult;
 import com.mpush.api.push.PushSender;
 import com.mpush.api.service.BaseService;
 import com.mpush.api.service.Listener;
-import com.mpush.cache.redis.manager.RedisManager;
-import com.mpush.client.gateway.GatewayClientFactory;
-import com.mpush.common.router.ConnectionRouterManager;
+import com.mpush.api.spi.common.CacheManagerFactory;
+import com.mpush.api.spi.common.ServiceDiscoveryFactory;
+import com.mpush.client.MPushClient;
+import com.mpush.client.gateway.connection.GatewayConnectionFactory;
+import com.mpush.common.router.CachedRemoteRouterManager;
 import com.mpush.common.router.RemoteRouter;
-import com.mpush.zk.ZKClient;
-import com.mpush.zk.listener.ZKServerNodeWatcher;
 
-import java.util.Collection;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.FutureTask;
 
-import static com.mpush.zk.ZKPath.GATEWAY_SERVER;
+public final class PushClient extends BaseService implements PushSender {
 
-/*package*/ class PushClient extends BaseService implements PushSender {
-    private static final int DEFAULT_TIMEOUT = 3000;
-    private final GatewayClientFactory factory = GatewayClientFactory.I;
-    private final ConnectionRouterManager routerManager = ConnectionRouterManager.I;
+    private MPushClient mPushClient;
 
-    public void send(String content, Collection<String> userIds, Callback callback) {
-        send(content.getBytes(Constants.UTF_8), userIds, callback);
-    }
+    private PushRequestBus pushRequestBus;
 
-    @Override
-    public FutureTask<Boolean> send(String content, String userId, Callback callback) {
-        return send(content.getBytes(Constants.UTF_8), userId, callback);
-    }
+    private CachedRemoteRouterManager cachedRemoteRouterManager;
 
-    @Override
-    public void send(byte[] content, Collection<String> userIds, Callback callback) {
-        for (String userId : userIds) {
-            send(content, userId, callback);
+    private GatewayConnectionFactory gatewayConnectionFactory;
+
+    private FutureTask<PushResult> send0(PushContext ctx) {
+        if (ctx.isBroadcast()) {
+            return PushRequest.build(mPushClient, ctx).broadcast();
+        } else {
+            Set<RemoteRouter> remoteRouters = cachedRemoteRouterManager.lookupAll(ctx.getUserId());
+            if (remoteRouters == null || remoteRouters.isEmpty()) {
+                return PushRequest.build(mPushClient, ctx).onOffline();
+            }
+            FutureTask<PushResult> task = null;
+            for (RemoteRouter remoteRouter : remoteRouters) {
+                task = PushRequest.build(mPushClient, ctx).send(remoteRouter);
+            }
+            return task;
         }
     }
 
     @Override
-    public FutureTask<Boolean> send(byte[] content, String userId, Callback callback) {
-        Set<RemoteRouter> routers = routerManager.lookupAll(userId);
-        if (routers == null || routers.isEmpty()) {
-            return PushRequest
-                    .build(this)
-                    .setCallback(callback)
-                    .setUserId(userId)
-                    .setContent(content)
-                    .setTimeout(DEFAULT_TIMEOUT)
-                    .offline();
-
+    public FutureTask<PushResult> send(PushContext ctx) {
+        if (ctx.isBroadcast()) {
+            return send0(ctx.setUserId(null));
+        } else if (ctx.getUserId() != null) {
+            return send0(ctx);
+        } else if (ctx.getUserIds() != null) {
+            FutureTask<PushResult> task = null;
+            for (String userId : ctx.getUserIds()) {
+                task = send0(ctx.setUserId(userId));
+            }
+            return task;
+        } else {
+            throw new PushException("param error.");
         }
-        FutureTask<Boolean> task = null;
-        for (RemoteRouter router : routers) {
-            task = PushRequest
-                    .build(this)
-                    .setCallback(callback)
-                    .setUserId(userId)
-                    .setContent(content)
-                    .setTimeout(DEFAULT_TIMEOUT)
-                    .send(router);
-        }
-        return task;
-    }
-
-    public Connection getGatewayConnection(String host) {
-        return factory.getConnection(host);
     }
 
     @Override
     protected void doStart(Listener listener) throws Throwable {
-        ZKClient.I.start(listener);
-        RedisManager.I.init();
-        ZKServerNodeWatcher.build(GATEWAY_SERVER, factory).beginWatch();
+        if (mPushClient == null) {
+            mPushClient = new MPushClient();
+        }
+
+        pushRequestBus = mPushClient.getPushRequestBus();
+        cachedRemoteRouterManager = mPushClient.getCachedRemoteRouterManager();
+        gatewayConnectionFactory = mPushClient.getGatewayConnectionFactory();
+
+        ServiceDiscoveryFactory.create().syncStart();
+        CacheManagerFactory.create().init();
+        pushRequestBus.syncStart();
+        gatewayConnectionFactory.start(listener);
     }
 
     @Override
     protected void doStop(Listener listener) throws Throwable {
-        factory.clear();
-        ZKClient.I.stop(listener);
+        ServiceDiscoveryFactory.create().syncStop();
+        CacheManagerFactory.create().destroy();
+        pushRequestBus.syncStop();
+        gatewayConnectionFactory.stop(listener);
     }
 
     @Override
     public boolean isRunning() {
         return started.get();
+    }
+
+    @Override
+    public void setMPushContext(MPushContext context) {
+        this.mPushClient = ((MPushClient) context);
     }
 }

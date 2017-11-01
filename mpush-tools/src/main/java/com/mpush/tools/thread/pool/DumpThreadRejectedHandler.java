@@ -19,6 +19,7 @@
 
 package com.mpush.tools.thread.pool;
 
+import com.mpush.tools.Utils;
 import com.mpush.tools.common.JVMUtil;
 import com.mpush.tools.config.CC;
 import org.slf4j.Logger;
@@ -31,7 +32,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import static com.mpush.tools.thread.pool.ThreadPoolConfig.REJECTED_POLICY_ABORT;
 import static com.mpush.tools.thread.pool.ThreadPoolConfig.REJECTED_POLICY_CALLER_RUNS;
 
-public class DumpThreadRejectedHandler implements RejectedExecutionHandler {
+public final class DumpThreadRejectedHandler implements RejectedExecutionHandler {
 
     private final static Logger LOGGER = LoggerFactory.getLogger(DumpThreadRejectedHandler.class);
 
@@ -50,7 +51,7 @@ public class DumpThreadRejectedHandler implements RejectedExecutionHandler {
 
     @Override
     public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
-        LOGGER.warn("one task rejected, poolConfig={}, poolInfo={}", poolConfig, ThreadPoolManager.getPoolInfo(e));
+        LOGGER.warn("one task rejected, poolConfig={}, poolInfo={}", poolConfig, Utils.getPoolInfo(e));
         if (!dumping) {
             dumping = true;
             dumpJVMInfo();
@@ -66,9 +67,9 @@ public class DumpThreadRejectedHandler implements RejectedExecutionHandler {
     }
 
     private void dumpJVMInfo() {
-        LOGGER.error("start dump jvm info");
+        LOGGER.info("start dump jvm info");
         JVMUtil.dumpJstack(DUMP_DIR + "/" + poolConfig.getName());
-        LOGGER.error("end dump jvm info");
+        LOGGER.info("end dump jvm info");
     }
 }
 

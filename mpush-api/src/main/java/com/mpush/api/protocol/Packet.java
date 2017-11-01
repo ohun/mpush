@@ -21,6 +21,9 @@ package com.mpush.api.protocol;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+
+import java.net.InetSocketAddress;
 
 /**
  * Created by ohun on 2015/12/19.
@@ -28,21 +31,26 @@ import io.netty.buffer.Unpooled;
  *
  * @author ohun@live.cn
  */
-public final class Packet {
+@SuppressWarnings("unchecked")
+public class Packet {
     public static final int HEADER_LEN = 13;
-    public static final byte FLAG_CRYPTO = 0x01;
-    public static final byte FLAG_COMPRESS = 0x02;
+
+    public static final byte FLAG_CRYPTO = 1;
+    public static final byte FLAG_COMPRESS = 2;
+    public static final byte FLAG_BIZ_ACK = 4;
+    public static final byte FLAG_AUTO_ACK = 8;
+    public static final byte FLAG_JSON_BODY = 16;
 
     public static final byte HB_PACKET_BYTE = -33;
     public static final byte[] HB_PACKET_BYTES = new byte[]{HB_PACKET_BYTE};
-    public static final Packet HB_PACKE = new Packet(Command.HEARTBEAT);
+    public static final Packet HB_PACKET = new Packet(Command.HEARTBEAT);
 
     public byte cmd; //命令
-    public short cc; //校验码 暂时没有用到
+    transient public short cc; //校验码 暂时没有用到
     public byte flags; //特性，如是否加密，是否压缩等
     public int sessionId; // 会话id。客户端生成。
-    public byte lrc; // 校验，纵向冗余校验。只校验head
-    public byte[] body;
+    transient public byte lrc; // 校验，纵向冗余校验。只校验head
+    transient public byte[] body;
 
     public Packet(byte cmd) {
         this.cmd = cmd;
@@ -74,6 +82,14 @@ public final class Packet {
         return (flags & flag) != 0;
     }
 
+    public <T> T getBody() {
+        return (T) body;
+    }
+
+    public <T> void setBody(T body) {
+        this.body = (byte[]) body;
+    }
+
     public short calcCheckCode() {
         short checkCode = 0;
         if (body != null) {
@@ -99,7 +115,7 @@ public final class Packet {
         return lrc;
     }
 
-    public boolean vaildCheckCode() {
+    public boolean validCheckCode() {
         return calcCheckCode() == cc;
     }
 
@@ -107,9 +123,54 @@ public final class Packet {
         return (lrc ^ calcLrc()) == 0;
     }
 
+    public InetSocketAddress sender() {
+        return null;
+    }
+
+    public void setRecipient(InetSocketAddress sender) {
+    }
+
+    public Packet response(Command command) {
+        return new Packet(command, sessionId);
+    }
+
+    public Object toFrame(Channel channel) {
+        return this;
+    }
+
+    public static Packet decodePacket(Packet packet, ByteBuf in, int bodyLength) {
+        packet.cc = in.readShort();//read cc
+        packet.flags = in.readByte();//read flags
+        packet.sessionId = in.readInt();//read sessionId
+        packet.lrc = in.readByte();//read lrc
+
+        //read body
+        if (bodyLength > 0) {
+            in.readBytes(packet.body = new byte[bodyLength]);
+        }
+        return packet;
+    }
+
+    public static void encodePacket(Packet packet, ByteBuf out) {
+        if (packet.cmd == Command.HEARTBEAT.cmd) {
+            out.writeByte(Packet.HB_PACKET_BYTE);
+        } else {
+            out.writeInt(packet.getBodyLength());
+            out.writeByte(packet.cmd);
+            out.writeShort(packet.cc);
+            out.writeByte(packet.flags);
+            out.writeInt(packet.sessionId);
+            out.writeByte(packet.lrc);
+            if (packet.getBodyLength() > 0) {
+                out.writeBytes(packet.body);
+            }
+        }
+        packet.body = null;
+    }
+
     @Override
     public String toString() {
-        return "Packet{" +
+        return "{" +
                 "cmd=" + cmd +
                 ", cc=" + cc +
                 ", flags=" + flags +

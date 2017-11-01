@@ -19,22 +19,34 @@
 
 package com.mpush.bootstrap.job;
 
-import com.mpush.api.spi.SpiLoader;
 import com.mpush.api.spi.net.DnsMappingManager;
-import com.mpush.common.net.HttpProxyDnsMappingManager;
-import com.mpush.tools.config.CC;
+import com.mpush.core.MPushServer;
 
 /**
  * Created by yxx on 2016/5/15.
  *
  * @author ohun@live.cn
  */
-public class HttpProxyBoot extends BootJob {
+public final class HttpProxyBoot extends BootJob {
+
+    private final MPushServer mPushServer;
+
+    public HttpProxyBoot(MPushServer mPushServer) {
+        this.mPushServer = mPushServer;
+    }
+
     @Override
-    void run() {
-        if (CC.mp.http.proxy_enabled) {
-            SpiLoader.load(DnsMappingManager.class, CC.mp.spi.dns_mapping_manager).start();
-        }
-        next();
+    protected void start() {
+        mPushServer.getHttpClient().syncStart();
+        DnsMappingManager.create().start();
+
+        startNext();
+    }
+
+    @Override
+    protected void stop() {
+        stopNext();
+        mPushServer.getHttpClient().syncStop();
+        DnsMappingManager.create().stop();
     }
 }

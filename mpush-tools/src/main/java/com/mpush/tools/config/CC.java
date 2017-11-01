@@ -20,25 +20,18 @@
 package com.mpush.tools.config;
 
 import com.mpush.api.spi.net.DnsMapping;
-import com.mpush.tools.config.data.RedisGroup;
-import com.mpush.tools.config.data.RedisServer;
-import com.typesafe.config.Config;
-import com.typesafe.config.ConfigFactory;
-import com.typesafe.config.ConfigList;
-import com.typesafe.config.ConfigObject;
+import com.mpush.tools.config.data.RedisNode;
+import com.typesafe.config.*;
 
 import java.io.File;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-import static com.typesafe.config.ConfigBeanFactory.create;
 import static java.util.stream.Collectors.toCollection;
 
 /**
+ * mpush 配置中心
  * Created by yxx on 2016/5/20.
  *
  * @author ohun@live.cn
@@ -47,8 +40,8 @@ public interface CC {
     Config cfg = load();
 
     static Config load() {
-        Config config = ConfigFactory.load();
-        String custom_conf = "mp.conf";
+        Config config = ConfigFactory.load();//扫描加载所有可用的配置文件
+        String custom_conf = "mp.conf";//加载自定义配置, 值来自jvm启动参数指定-Dmp.conf
         if (config.hasPath(custom_conf)) {
             File file = new File(config.getString(custom_conf));
             if (file.exists()) {
@@ -61,8 +54,9 @@ public interface CC {
 
     interface mp {
         Config cfg = CC.cfg.getObject("mp").toConfig();
-        String log_dir = cfg.getString("log.dir");
-        String log_level = cfg.getString("log.level");
+        String log_dir = cfg.getString("log-dir");
+        String log_level = cfg.getString("log-level");
+        String log_conf_path = cfg.getString("log-conf-path");
 
         interface core {
             Config cfg = mp.cfg.getObject("core").toConfig();
@@ -80,23 +74,90 @@ public interface CC {
             int max_hb_timeout_times = cfg.getInt("max-hb-timeout-times");
 
             String epoll_provider = cfg.getString("epoll-provider");
+
+            static boolean useNettyEpoll() {
+                if (!"netty".equals(CC.mp.core.epoll_provider)) return false;
+                String name = CC.cfg.getString("os.name").toLowerCase(Locale.UK).trim();
+                return name.startsWith("linux");//只在linux下使用netty提供的epoll库
+            }
         }
 
         interface net {
             Config cfg = mp.cfg.getObject("net").toConfig();
 
+            String local_ip = cfg.getString("local-ip");
+            String public_ip = cfg.getString("public-ip");
+
             int connect_server_port = cfg.getInt("connect-server-port");
-            int gateway_server_port = cfg.getInt("gateway-server-port");
+            String connect_server_bind_ip = cfg.getString("connect-server-bind-ip");
+            String connect_server_register_ip = cfg.getString("connect-server-register-ip");
+            Map<String, Object> connect_server_register_attr = cfg.getObject("connect-server-register-attr").unwrapped();
+
+
             int admin_server_port = cfg.getInt("admin-server-port");
+
+            int gateway_server_port = cfg.getInt("gateway-server-port");
+            String gateway_server_bind_ip = cfg.getString("gateway-server-bind-ip");
+            String gateway_server_register_ip = cfg.getString("gateway-server-register-ip");
+            String gateway_server_net = cfg.getString("gateway-server-net");
+            String gateway_server_multicast = cfg.getString("gateway-server-multicast");
+            String gateway_client_multicast = cfg.getString("gateway-client-multicast");
+            int gateway_client_port = cfg.getInt("gateway-client-port");
+
+            int ws_server_port = cfg.getInt("ws-server-port");
+            String ws_path = cfg.getString("ws-path");
+            int gateway_client_num = cfg.getInt("gateway-client-num");
+
+            static boolean tcpGateway() {
+                return "tcp".equals(gateway_server_net);
+            }
+
+            static boolean udpGateway() {
+                return "udp".equals(gateway_server_net);
+            }
+
+            static boolean wsEnabled() {
+                return ws_server_port > 0;
+            }
+
+            static boolean udtGateway() {
+                return "udt".equals(gateway_server_net);
+            }
+
+            static boolean sctpGateway() {
+                return "sctp".equals(gateway_server_net);
+            }
+
 
             interface public_ip_mapping {
 
                 Map<String, Object> mappings = net.cfg.getObject("public-host-mapping").unwrapped();
 
                 static String getString(String localIp) {
-                    return (String) mappings.getOrDefault(localIp, localIp);
+                    return (String) mappings.get(localIp);
                 }
+            }
 
+            interface snd_buf {
+                Config cfg = net.cfg.getObject("snd_buf").toConfig();
+                int connect_server = (int) cfg.getMemorySize("connect-server").toBytes();
+                int gateway_server = (int) cfg.getMemorySize("gateway-server").toBytes();
+                int gateway_client = (int) cfg.getMemorySize("gateway-client").toBytes();
+            }
+
+            interface rcv_buf {
+                Config cfg = net.cfg.getObject("rcv_buf").toConfig();
+                int connect_server = (int) cfg.getMemorySize("connect-server").toBytes();
+                int gateway_server = (int) cfg.getMemorySize("gateway-server").toBytes();
+                int gateway_client = (int) cfg.getMemorySize("gateway-client").toBytes();
+            }
+
+            interface write_buffer_water_mark {
+                Config cfg = net.cfg.getObject("write-buffer-water-mark").toConfig();
+                int connect_server_low = (int) cfg.getMemorySize("connect-server-low").toBytes();
+                int connect_server_high = (int) cfg.getMemorySize("connect-server-high").toBytes();
+                int gateway_server_low = (int) cfg.getMemorySize("gateway-server-low").toBytes();
+                int gateway_server_high = (int) cfg.getMemorySize("gateway-server-high").toBytes();
             }
 
             interface traffic_shaping {
@@ -144,8 +205,6 @@ public interface CC {
 
             String private_key = cfg.getString("private-key");
 
-            int ras_key_length = cfg.getInt("ras-key-length");
-
         }
 
         interface thread {
@@ -156,40 +215,16 @@ public interface CC {
 
                 Config cfg = thread.cfg.getObject("pool").toConfig();
 
-                interface boss {
-                    Config cfg = pool.cfg.getObject("boss").toConfig();
-                    int min = cfg.getInt("min");
-                    int max = cfg.getInt("max");
-                    int queue_size = cfg.getInt("queue-size");
-
-                }
-
-                interface work {
-                    Config cfg = pool.cfg.getObject("work").toConfig();
-                    int min = cfg.getInt("min");
-                    int max = cfg.getInt("max");
-                    int queue_size = cfg.getInt("queue-size");
-
-                }
+                int conn_work = cfg.getInt("conn-work");
+                int http_work = cfg.getInt("http-work");
+                int push_task = cfg.getInt("push-task");
+                int push_client = cfg.getInt("push-client");
+                int ack_timer = cfg.getInt("ack-timer");
+                int gateway_server_work = cfg.getInt("gateway-server-work");
+                int gateway_client_work = cfg.getInt("gateway-client-work");
 
                 interface event_bus {
                     Config cfg = pool.cfg.getObject("event-bus").toConfig();
-                    int min = cfg.getInt("min");
-                    int max = cfg.getInt("max");
-                    int queue_size = cfg.getInt("queue-size");
-
-                }
-
-                interface http_proxy {
-                    Config cfg = pool.cfg.getObject("http-proxy").toConfig();
-                    int min = cfg.getInt("min");
-                    int max = cfg.getInt("max");
-                    int queue_size = cfg.getInt("queue-size");
-
-                }
-
-                interface biz {
-                    Config cfg = pool.cfg.getObject("biz").toConfig();
                     int min = cfg.getInt("min");
                     int max = cfg.getInt("max");
                     int queue_size = cfg.getInt("queue-size");
@@ -201,17 +236,8 @@ public interface CC {
                     int min = cfg.getInt("min");
                     int max = cfg.getInt("max");
                     int queue_size = cfg.getInt("queue-size");
-
-                }
-
-                interface push_callback {
-                    Config cfg = pool.cfg.getObject("push-callback").toConfig();
-                    int min = cfg.getInt("min");
-                    int max = cfg.getInt("max");
-                    int queue_size = cfg.getInt("queue-size");
                 }
             }
-
         }
 
         interface zk {
@@ -220,7 +246,7 @@ public interface CC {
 
             int sessionTimeoutMs = (int) cfg.getDuration("sessionTimeoutMs", TimeUnit.MILLISECONDS);
 
-            String local_cache_path = cfg.getString("local-cache-path");
+            String watch_path = cfg.getString("watch-path");
 
             int connectionTimeoutMs = (int) cfg.getDuration("connectionTimeoutMs", TimeUnit.MILLISECONDS);
 
@@ -240,66 +266,31 @@ public interface CC {
 
                 int maxSleepMs = (int) cfg.getDuration("maxSleepMs", TimeUnit.MILLISECONDS);
             }
-
         }
 
         interface redis {
             Config cfg = mp.cfg.getObject("redis").toConfig();
 
-            boolean write_to_zk = cfg.getBoolean("write-to-zk");
+            String password = cfg.getString("password");
+            String clusterModel = cfg.getString("cluster-model");
+            String sentinelMaster = cfg.getString("sentinel-master");
 
-            List<RedisGroup> cluster_group = cfg.getList("cluster-group")
-                    .stream()
-                    .map(v -> new RedisGroup(ConfigList.class.cast(v)
-                                    .stream()
-                                    .map(cv -> create(ConfigObject.class.cast(cv).toConfig(), RedisServer.class))
-                                    .collect(toCollection(ArrayList::new))
-                            )
-                    )
+            List<RedisNode> nodes = cfg.getList("nodes")
+                    .stream()//第一纬度数组
+                    .map(v -> RedisNode.from(v.unwrapped().toString()))
                     .collect(toCollection(ArrayList::new));
 
-            interface config {
-
-                Config cfg = redis.cfg.getObject("config").toConfig();
-
-                boolean jmxEnabled = cfg.getBoolean("jmxEnabled");
-
-                int minIdle = cfg.getInt("minIdle");
-
-                boolean testOnReturn = cfg.getBoolean("testOnReturn");
-
-                long softMinEvictableIdleTimeMillis = cfg.getDuration("softMinEvictableIdleTimeMillis", TimeUnit.MILLISECONDS);
-
-                boolean testOnBorrow = cfg.getBoolean("testOnBorrow");
-
-                boolean testWhileIdle = cfg.getBoolean("testWhileIdle");
-
-                long maxWaitMillis = cfg.getDuration("maxWaitMillis", TimeUnit.MILLISECONDS);
-
-                String jmxNameBase = cfg.getString("jmxNameBase");
-
-                int numTestsPerEvictionRun = (int) cfg.getDuration("numTestsPerEvictionRun", TimeUnit.MILLISECONDS);
-
-                String jmxNamePrefix = cfg.getString("jmxNamePrefix");
-
-                long minEvictableIdleTimeMillis = cfg.getDuration("minEvictableIdleTimeMillis", TimeUnit.MILLISECONDS);
-
-                boolean blockWhenExhausted = cfg.getBoolean("blockWhenExhausted");
-
-                boolean fairness = cfg.getBoolean("fairness");
-
-                long timeBetweenEvictionRunsMillis = cfg.getDuration("timeBetweenEvictionRunsMillis", TimeUnit.MILLISECONDS);
-
-                boolean testOnCreate = cfg.getBoolean("testOnCreate");
-
-                int maxIdle = cfg.getInt("maxIdle");
-
-                boolean lifo = cfg.getBoolean("lifo");
-
-                int maxTotal = cfg.getInt("maxTotal");
-
+            static boolean isCluster() {
+                return "cluster".equals(clusterModel);
             }
 
+            static boolean isSentinel() {
+                return "sentinel".equals(clusterModel);
+            }
+
+            static <T> T getPoolConfig(Class<T> clazz) {
+                return ConfigBeanImpl.createInternal(cfg.getObject("config").toConfig(), clazz);
+            }
         }
 
         interface http {
@@ -325,7 +316,30 @@ public interface CC {
                 );
                 return map;
             }
+        }
 
+        interface push {
+
+            Config cfg = mp.cfg.getObject("push").toConfig();
+
+            interface flow_control {
+
+                Config cfg = push.cfg.getObject("flow-control").toConfig();
+
+                interface global {
+                    Config cfg = flow_control.cfg.getObject("global").toConfig();
+                    int limit = cfg.getNumber("limit").intValue();
+                    int max = cfg.getInt("max");
+                    int duration = (int) cfg.getDuration("duration").toMillis();
+                }
+
+                interface broadcast {
+                    Config cfg = flow_control.cfg.getObject("broadcast").toConfig();
+                    int limit = cfg.getInt("limit");
+                    int max = cfg.getInt("max");
+                    int duration = (int) cfg.getDuration("duration").toMillis();
+                }
+            }
         }
 
         interface monitor {
@@ -334,12 +348,8 @@ public interface CC {
             boolean dump_stack = cfg.getBoolean("dump-stack");
             boolean print_log = cfg.getBoolean("print-log");
             Duration dump_period = cfg.getDuration("dump-period");
-        }
-
-        interface spi {
-            Config cfg = mp.cfg.getObject("spi").toConfig();
-            String thread_pool_factory = cfg.getString("thread-pool-factory");
-            String dns_mapping_manager = cfg.getString("dns-mapping-manager");
+            boolean profile_enabled = cfg.getBoolean("profile-enabled");
+            Duration profile_slowly_duration = cfg.getDuration("profile-slowly-duration");
         }
     }
 }

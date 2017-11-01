@@ -23,7 +23,7 @@ import com.mpush.api.service.BaseService;
 import com.mpush.api.service.Listener;
 import com.mpush.tools.config.CC;
 import com.mpush.tools.thread.NamedThreadFactory;
-import com.mpush.tools.thread.pool.ThreadPoolManager;
+import com.mpush.tools.thread.ThreadNames;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.*;
@@ -36,12 +36,15 @@ import io.netty.handler.codec.http.HttpResponseDecoder;
 import io.netty.util.AttributeKey;
 import io.netty.util.HashedWheelTimer;
 import io.netty.util.Timer;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
 
+import static com.mpush.tools.config.CC.mp.thread.pool.http_work;
+import static com.mpush.tools.thread.ThreadNames.T_HTTP_TIMER;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
 import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
 import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
@@ -82,17 +85,14 @@ public class NettyHttpClient extends BaseService implements HttpClient {
             final long startCreate = System.currentTimeMillis();
             LOGGER.debug("create new channel, host={}", host);
             ChannelFuture f = b.connect(host, port);
-            f.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.debug("create new channel cost={}", (System.currentTimeMillis() - startCreate));
-                    if (future.isSuccess()) {//3.1.把请求写到http server
-                        writeRequest(future.channel(), context);
-                    } else {//3.2如果链接创建失败，直接返回客户端网关超时
-                        context.tryDone();
-                        context.onFailure(504, "Gateway Timeout");
-                        LOGGER.warn("create new channel failure, request={}", context);
-                    }
+            f.addListener((ChannelFutureListener) future -> {
+                LOGGER.debug("create new channel cost={}", (System.currentTimeMillis() - startCreate));
+                if (future.isSuccess()) {//3.1.把请求写到http server
+                    writeRequest(future.channel(), context);
+                } else {//3.2如果链接创建失败，直接返回客户端网关超时
+                    context.tryDone();
+                    context.onFailure(504, "Gateway Timeout");
+                    LOGGER.warn("create new channel failure, request={}", context);
                 }
             });
         } else {
@@ -104,23 +104,20 @@ public class NettyHttpClient extends BaseService implements HttpClient {
     private void writeRequest(Channel channel, RequestContext context) {
         channel.attr(requestKey).set(context);
         pool.attachHost(context.host, channel);
-        channel.writeAndFlush(context.request).addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                if (!future.isSuccess()) {
-                    RequestContext info = future.channel().attr(requestKey).getAndRemove();
-                    info.tryDone();
-                    info.onFailure(503, "Service Unavailable");
-                    LOGGER.debug("request failure request={}", info);
-                    pool.tryRelease(future.channel());
-                }
+        channel.writeAndFlush(context.request).addListener((ChannelFutureListener) future -> {
+            if (!future.isSuccess()) {
+                RequestContext info = future.channel().attr(requestKey).getAndSet(null);
+                info.tryDone();
+                info.onFailure(503, "Service Unavailable");
+                LOGGER.debug("request failure request={}", info);
+                pool.tryRelease(future.channel());
             }
         });
     }
 
     @Override
     protected void doStart(Listener listener) throws Throwable {
-        workerGroup = new NioEventLoopGroup(0, ThreadPoolManager.I.getHttpExecutor());
+        workerGroup = new NioEventLoopGroup(http_work, new DefaultThreadFactory(ThreadNames.T_HTTP_CLIENT));
         b = new Bootstrap();
         b.group(workerGroup);
         b.channel(NioSocketChannel.class);
@@ -138,7 +135,8 @@ public class NettyHttpClient extends BaseService implements HttpClient {
                 ch.pipeline().addLast("handler", new HttpClientHandler(NettyHttpClient.this));
             }
         });
-        timer = new HashedWheelTimer(new NamedThreadFactory("http-client-timer-"), 1, TimeUnit.SECONDS, 64);
+        timer = new HashedWheelTimer(new NamedThreadFactory(T_HTTP_TIMER), 1, TimeUnit.SECONDS, 64);
+        listener.onSuccess();
     }
 
     @Override
@@ -146,5 +144,6 @@ public class NettyHttpClient extends BaseService implements HttpClient {
         pool.close();
         workerGroup.shutdownGracefully();
         timer.stop();
+        listener.onSuccess();
     }
 }

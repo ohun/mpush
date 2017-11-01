@@ -19,14 +19,19 @@
 
 package com.mpush.common.message;
 
-import com.mpush.api.Message;
+import com.mpush.api.message.Message;
 import com.mpush.api.connection.Connection;
 import com.mpush.api.connection.SessionContext;
 import com.mpush.api.protocol.Packet;
+import com.mpush.tools.Jsons;
 import com.mpush.tools.common.IOUtils;
+import com.mpush.tools.common.Profiler;
 import com.mpush.tools.config.CC;
 import io.netty.channel.ChannelFutureListener;
 
+import java.net.InetSocketAddress;
+import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -35,41 +40,76 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author ohun@live.cn
  */
 public abstract class BaseMessage implements Message {
+    private static final byte STATUS_DECODED = 1;
+    private static final byte STATUS_ENCODED = 2;
     private static final AtomicInteger ID_SEQ = new AtomicInteger();
-    protected final Packet packet;
-    protected final Connection connection;
+    transient protected Packet packet;
+    transient protected Connection connection;
+    transient private byte status = 0;
 
     public BaseMessage(Packet packet, Connection connection) {
         this.packet = packet;
         this.connection = connection;
-        decodeBody();
     }
 
-    protected void decodeBody() {
-        if (packet.body != null && packet.body.length > 0) {
-            //1.解密
-            byte[] tmp = packet.body;
-            if (packet.hasFlag(Packet.FLAG_CRYPTO)) {
-                if (connection.getSessionContext().cipher != null) {
-                    tmp = connection.getSessionContext().cipher.decrypt(tmp);
+    @Override
+    public void decodeBody() {
+        if ((status & STATUS_DECODED) == 0) {
+            status |= STATUS_DECODED;
+
+            if (packet.getBodyLength() > 0) {
+                if (packet.hasFlag(Packet.FLAG_JSON_BODY)) {
+                    decodeJsonBody0();
+                } else {
+                    decodeBinaryBody0();
                 }
             }
-            //2.解压
-            if (packet.hasFlag(Packet.FLAG_COMPRESS)) {
-                tmp = IOUtils.decompress(tmp);
-            }
 
-            if (tmp.length == 0) {
-                throw new RuntimeException("message decode ex");
-            }
-
-            packet.body = tmp;
-            decode(packet.body);
         }
     }
 
-    protected void encodeBody() {
+    @Override
+    public void encodeBody() {
+        if ((status & STATUS_ENCODED) == 0) {
+            status |= STATUS_ENCODED;
+
+            if (packet.hasFlag(Packet.FLAG_JSON_BODY)) {
+                encodeJsonBody0();
+            } else {
+                encodeBinaryBody0();
+            }
+        }
+
+    }
+
+    private void decodeBinaryBody0() {
+        //1.解密
+        byte[] tmp = packet.body;
+        if (packet.hasFlag(Packet.FLAG_CRYPTO)) {
+            if (connection.getSessionContext().cipher != null) {
+                tmp = connection.getSessionContext().cipher.decrypt(tmp);
+            }
+        }
+        //2.解压
+        if (packet.hasFlag(Packet.FLAG_COMPRESS)) {
+            tmp = IOUtils.decompress(tmp);
+        }
+
+        if (tmp.length == 0) {
+            throw new RuntimeException("message decode ex");
+        }
+
+        packet.body = tmp;
+        Profiler.enter("time cost on [body decode]");
+        decode(packet.body);
+        Profiler.release();
+        packet.body = null;// 释放内存
+    }
+
+    private void encodeBinaryBody0() {
+        Profiler.enter("time cost on [body encode]");
         byte[] tmp = encode();
+        Profiler.release();
         if (tmp != null && tmp.length > 0) {
             //1.压缩
             if (tmp.length > CC.mp.core.compress_threshold) {
@@ -93,12 +133,45 @@ public abstract class BaseMessage implements Message {
         }
     }
 
+    private void decodeJsonBody0() {
+        Map<String, Object> body = packet.getBody();
+        decodeJsonBody(body);
+    }
+
+    private void encodeJsonBody0() {
+        packet.setBody(encodeJsonBody());
+    }
+
+    private void encodeJsonStringBody0() {
+        packet.setBody(encodeJsonStringBody());
+    }
+
+    protected String encodeJsonStringBody() {
+        return Jsons.toJson(this);
+    }
+
+    private void encodeBodyRaw() {
+        if ((status & STATUS_ENCODED) == 0) {
+            status |= STATUS_ENCODED;
+
+            if (packet.hasFlag(Packet.FLAG_JSON_BODY)) {
+                encodeJsonBody0();
+            } else {
+                packet.body = encode();
+            }
+        }
+    }
+
     public abstract void decode(byte[] body);
 
     public abstract byte[] encode();
 
-    public Packet createResponse() {
-        return new Packet(packet.cmd, packet.sessionId);
+    protected void decodeJsonBody(Map<String, Object> body) {
+
+    }
+
+    protected Map<String, Object> encodeJsonBody() {
+        return null;
     }
 
     @Override
@@ -119,7 +192,7 @@ public abstract class BaseMessage implements Message {
 
     @Override
     public void sendRaw(ChannelFutureListener listener) {
-        packet.body = encode();
+        encodeBodyRaw();
         connection.send(packet, listener);
     }
 
@@ -141,6 +214,27 @@ public abstract class BaseMessage implements Message {
 
     public int getSessionId() {
         return packet.sessionId;
+    }
+
+    public BaseMessage setRecipient(InetSocketAddress recipient) {
+        packet.setRecipient(recipient);
+        return this;
+    }
+
+    public void setPacket(Packet packet) {
+        this.packet = packet;
+    }
+
+    public void setConnection(Connection connection) {
+        this.connection = connection;
+    }
+
+    public ScheduledExecutorService getExecutor() {
+        return connection.getChannel().eventLoop();
+    }
+
+    public void runInRequestThread(Runnable runnable) {
+        connection.getChannel().eventLoop().execute(runnable);
     }
 
     @Override

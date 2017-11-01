@@ -20,6 +20,7 @@
 package com.mpush.tools.common;
 
 
+import com.mpush.tools.config.CC;
 import org.apache.commons.lang3.StringUtils;
 
 import java.text.MessageFormat;
@@ -32,15 +33,21 @@ import java.util.List;
  */
 @SuppressWarnings(value = {"rawtypes", "unchecked"})
 public class Profiler {
+    private static volatile boolean enabled = CC.mp.monitor.profile_enabled;
 
     private static final ThreadLocal entryStack = new ThreadLocal();
     public static final String EMPTY_STRING = "";
+
+    public static void enable(boolean enabled) {
+        Profiler.enabled = enabled;
+        reset();
+    }
 
     /**
      * 开始计时。
      */
     public static void start() {
-        start((String) null);
+        start(EMPTY_STRING);
     }
 
     /**
@@ -48,9 +55,8 @@ public class Profiler {
      *
      * @param message 第一个entry的信息
      */
-
-    public static void start(String message) {
-        entryStack.set(new Entry(message, null, null));
+    public static void start(String message, Object... args) {
+        if (enabled) entryStack.set(new Entry(String.format(message, args), null, null));
     }
 
     /**
@@ -59,18 +65,17 @@ public class Profiler {
      * @param message 第一个entry的信息
      */
     public static void start(Message message) {
-        entryStack.set(new Entry(message, null, null));
+        if (enabled) entryStack.set(new Entry(message, null, null));
     }
 
     /**
      * 清除计时器。
-     * <p/>
      * <p>
      * 清除以后必须再次调用<code>start</code>方可重新计时。
      * </p>
      */
     public static void reset() {
-        entryStack.set(null);
+        entryStack.remove();
     }
 
     /**
@@ -79,10 +84,12 @@ public class Profiler {
      * @param message 新entry的信息
      */
     public static void enter(String message) {
-        Entry currentEntry = getCurrentEntry();
+        if (enabled) {
+            Entry currentEntry = getCurrentEntry();
 
-        if (currentEntry != null) {
-            currentEntry.enterSubEntry(message);
+            if (currentEntry != null) {
+                currentEntry.enterSubEntry(message);
+            }
         }
     }
 
@@ -92,10 +99,12 @@ public class Profiler {
      * @param message 新entry的信息
      */
     public static void enter(Message message) {
-        Entry currentEntry = getCurrentEntry();
+        if (enabled) {
+            Entry currentEntry = getCurrentEntry();
 
-        if (currentEntry != null) {
-            currentEntry.enterSubEntry(message);
+            if (currentEntry != null) {
+                currentEntry.enterSubEntry(message);
+            }
         }
     }
 
@@ -103,10 +112,12 @@ public class Profiler {
      * 结束最近的一个entry，记录结束时间。
      */
     public static void release() {
-        Entry currentEntry = getCurrentEntry();
+        if (enabled) {
+            Entry currentEntry = getCurrentEntry();
 
-        if (currentEntry != null) {
-            currentEntry.release();
+            if (currentEntry != null) {
+                currentEntry.release();
+            }
         }
     }
 
@@ -116,13 +127,16 @@ public class Profiler {
      * @return 耗费的总时间，如果未开始计时，则返回<code>-1</code>
      */
     public static long getDuration() {
-        Entry entry = (Entry) entryStack.get();
+        if (enabled) {
+            Entry entry = (Entry) entryStack.get();
 
-        if (entry != null) {
-            return entry.getDuration();
-        } else {
-            return -1;
+            if (entry != null) {
+                return entry.getDuration();
+            } else {
+                return -1;
+            }
         }
+        return -1;
     }
 
     /**
@@ -217,9 +231,6 @@ public class Profiler {
                     : firstEntry.startTime;
         }
 
-        /**
-         * 取得entry的信息。
-         */
         public String getMessage() {
             String messageString = null;
 
@@ -418,7 +429,7 @@ public class Profiler {
          * @return 字符串表示的entry
          */
         private String toString(String prefix1, String prefix2) {
-            StringBuffer buffer = new StringBuffer();
+            StringBuilder buffer = new StringBuilder();
 
             toString(buffer, prefix1, prefix2);
 
@@ -432,7 +443,7 @@ public class Profiler {
          * @param prefix1 首行前缀
          * @param prefix2 后续行前缀
          */
-        private void toString(StringBuffer buffer, String prefix1, String prefix2) {
+        private void toString(StringBuilder buffer, String prefix1, String prefix2) {
             buffer.append(prefix1);
 
             String message = getMessage();

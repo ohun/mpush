@@ -19,13 +19,17 @@
 
 package com.mpush.tools.common;
 
+import com.mpush.tools.Utils;
 import com.sun.management.HotSpotDiagnosticMXBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
-import java.io.*;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.lang.management.*;
 import java.security.AccessController;
 import java.security.PrivilegedExceptionAction;
@@ -107,23 +111,14 @@ public class JVMUtil {
     }
 
     public static void dumpJstack(final String jvmPath) {
-        new Thread((new Runnable() {
-            @Override
-            public void run() {
-                String logPath = jvmPath;
-                FileOutputStream jstackStream = null;
-                try {
-                    jstackStream = new FileOutputStream(new File(logPath, System.currentTimeMillis() + "-jstack.LOGGER"));
-                    JVMUtil.jstack(jstackStream);
+        Utils.newThread("dump-jstack-t", (() -> {
+            File path = new File(jvmPath);
+            if (path.exists() || path.mkdirs()) {
+                File file = new File(path, System.currentTimeMillis() + "-jstack.log");
+                try (FileOutputStream out = new FileOutputStream(file)) {
+                    JVMUtil.jstack(out);
                 } catch (Throwable t) {
                     LOGGER.error("Dump JVM cache Error!", t);
-                } finally {
-                    if (jstackStream != null) {
-                        try {
-                            jstackStream.close();
-                        } catch (IOException e) {
-                        }
-                    }
                 }
             }
         })).start();
@@ -163,7 +158,7 @@ public class JVMUtil {
     }
 
     public static void jMap(String fileName, boolean live) {
-        File f = new File(fileName, System.currentTimeMillis() + "-jmap.LOGGER");
+        File f = new File(fileName, System.currentTimeMillis() + "-jmap.log");
         String currentFileName = f.getPath();
         try {
             initHotSpotMBean();
@@ -177,11 +172,6 @@ public class JVMUtil {
     }
 
     public static void dumpJmap(final String jvmPath) {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                jMap(jvmPath, false);
-            }
-        }).start();
+        Utils.newThread("dump-jmap-t", () -> jMap(jvmPath, false)).start();
     }
 }

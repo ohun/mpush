@@ -21,56 +21,59 @@ package com.mpush.bootstrap.job;
 
 import com.mpush.api.service.Listener;
 import com.mpush.api.service.Server;
-import com.mpush.tools.Jsons;
+import com.mpush.api.spi.common.ServiceRegistryFactory;
+import com.mpush.api.srd.ServiceNode;
 import com.mpush.tools.log.Logs;
-import com.mpush.tools.thread.pool.ThreadPoolManager;
-import com.mpush.zk.ZKClient;
-import com.mpush.zk.node.ZKServerNode;
 
 /**
  * Created by yxx on 2016/5/14.
  *
  * @author ohun@live.cn
  */
-public class ServerBoot extends BootJob {
+public final class ServerBoot extends BootJob {
     private final Server server;
-    private final ZKServerNode node;
+    private final ServiceNode node;
 
-    public ServerBoot(Server server, ZKServerNode node) {
+    public ServerBoot(Server server, ServiceNode node) {
         this.server = server;
         this.node = node;
     }
 
     @Override
-    public void run() {
-        final String serverName = server.getClass().getSimpleName();
-        ThreadPoolManager.I.newThread(serverName, new Runnable() {
+    public void start() {
+        server.init();
+        server.start(new Listener() {
             @Override
-            public void run() {
-                server.init();
-                server.start(new Listener() {
-                    @Override
-                    public void onSuccess(Object... args) {
-                        Logs.Console.error("start " + serverName + " success listen:" + args[0]);
-                        if (node != null) {
-                            registerServerToZk(node.getZkPath(), Jsons.toJson(node));
-                        }
-                        next();
-                    }
-
-                    @Override
-                    public void onFailure(Throwable cause) {
-                        Logs.Console.error("start " + serverName + " failure, jvm exit with code -1", cause);
-                        System.exit(-1);
-                    }
-                });
+            public void onSuccess(Object... args) {
+                Logs.Console.info("start {} success on:{}", server.getClass().getSimpleName(), args[0]);
+                if (node != null) {//注册应用到zk
+                    ServiceRegistryFactory.create().register(node);
+                    Logs.RSD.info("register {} to srd success.", node);
+                }
+                startNext();
             }
-        }).start();
+
+            @Override
+            public void onFailure(Throwable cause) {
+                Logs.Console.error("start {} failure, jvm exit with code -1", server.getClass().getSimpleName(), cause);
+                System.exit(-1);
+            }
+        });
     }
 
-    //step7  注册应用到zk
-    public void registerServerToZk(String path, String value) {
-        ZKClient.I.registerEphemeralSequential(path, value);
-        Logs.Console.error("register server node=" + value + " to zk name=" + path);
+    @Override
+    protected void stop() {
+        stopNext();
+        if (node != null) {
+            ServiceRegistryFactory.create().deregister(node);
+        }
+        Logs.Console.info("try shutdown {}...", server.getClass().getSimpleName());
+        server.stop().join();
+        Logs.Console.info("{} shutdown success.", server.getClass().getSimpleName());
+    }
+
+    @Override
+    protected String getName() {
+        return super.getName() + '(' + server.getClass().getSimpleName() + ')';
     }
 }

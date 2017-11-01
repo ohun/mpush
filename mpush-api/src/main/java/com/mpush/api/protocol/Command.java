@@ -21,6 +21,8 @@ package com.mpush.api.protocol;
 
 /**
  * Created by ohun on 2015/12/22.
+ *
+ * @author ohun@live.cn
  */
 public enum Command {
     HEARTBEAT(1),
@@ -45,6 +47,8 @@ public enum Command {
     GATEWAY_CHAT(20),
     GROUP(21),
     GATEWAY_GROUP(22),
+    ACK(23),
+    NACK(24),
     UNKNOWN(-1);
 
     Command(int cmd) {
@@ -54,7 +58,8 @@ public enum Command {
     public final byte cmd;
 
     public static Command toCMD(byte b) {
-        if (b > 0 && b < values().length) return values()[b - 1];
+        Command[] values = values();
+        if (b > 0 && b < values.length) return values[b - 1];
         return UNKNOWN;
     }
 }

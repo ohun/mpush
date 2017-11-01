@@ -19,17 +19,30 @@
 
 package com.mpush.bootstrap.job;
 
-import com.mpush.monitor.service.MonitorService;
+import com.mpush.core.MPushServer;
 
 /**
  * Created by yxx on 2016/5/15.
  *
  * @author ohun@live.cn
  */
-public class MonitorBoot extends BootJob {
+public final class MonitorBoot extends BootJob {
+
+    private final MPushServer mPushServer;
+
+    public MonitorBoot(MPushServer mPushServer) {
+        this.mPushServer = mPushServer;
+    }
+
     @Override
-    void run() {
-        MonitorService.I.start();
-        next();
+    protected void start() {
+        mPushServer.getMonitor().start();
+        startNext();
+    }
+
+    @Override
+    protected void stop() {
+        stopNext();
+        mPushServer.getMonitor().stop();
     }
 }

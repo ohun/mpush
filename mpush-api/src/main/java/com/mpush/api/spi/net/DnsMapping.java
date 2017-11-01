@@ -24,8 +24,11 @@ import java.net.URL;
 import java.util.Objects;
 
 public class DnsMapping {
-    private String ip;
-    private int port;
+    protected String ip;
+    protected int port;
+
+    public DnsMapping() {
+    }
 
     public DnsMapping(String ip, int port) {
         this.ip = ip;
@@ -38,6 +41,16 @@ public class DnsMapping {
 
     public int getPort() {
         return port;
+    }
+
+    public DnsMapping setIp(String ip) {
+        this.ip = ip;
+        return this;
+    }
+
+    public DnsMapping setPort(int port) {
+        this.port = port;
+        return this;
     }
 
     public static DnsMapping parse(String addr) {
@@ -60,6 +73,24 @@ public class DnsMapping {
         String query = uri.getQuery();
         if (query != null) sb.append('?').append(query);
         return sb.toString();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        DnsMapping that = (DnsMapping) o;
+
+        if (port != that.port) return false;
+        return ip.equals(that.ip);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = ip.hashCode();
+        result = 31 * result + port;
+        return result;
     }
 
     @Override

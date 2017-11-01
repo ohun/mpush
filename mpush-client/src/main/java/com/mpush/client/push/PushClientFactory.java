@@ -20,23 +20,28 @@
 package com.mpush.client.push;
 
 import com.mpush.api.push.PushSender;
+import com.mpush.api.spi.Spi;
 import com.mpush.api.spi.client.PusherFactory;
+import com.mpush.client.MPushClient;
 
 /**
  * Created by yxx on 2016/5/18.
  *
  * @author ohun@live.cn
  */
+@Spi
 public class PushClientFactory implements PusherFactory {
-    private static PushClient CLIENT;
+    private volatile PushClient client;
 
     @Override
     public PushSender get() {
-        if (CLIENT == null) {
+        if (client == null) {
             synchronized (PushClientFactory.class) {
-                CLIENT = new PushClient();
+                if (client == null) {
+                    client = new PushClient();
+                }
             }
         }
-        return CLIENT;
+        return client;
     }
 }

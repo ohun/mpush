@@ -19,18 +19,20 @@
 
 package com.mpush.tools;
 
-import com.mpush.tools.common.Profiler;
+import com.mpush.tools.thread.NamedThreadFactory;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.SingleThreadEventLoop;
+import io.netty.util.concurrent.EventExecutor;
+import io.netty.util.concurrent.ThreadProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.NetworkInterface;
-import java.net.Socket;
+import java.net.*;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.regex.Pattern;
 
 /**
@@ -47,6 +49,12 @@ public final class Utils {
 
     private static String EXTRANET_IP;
 
+    private static final NamedThreadFactory NAMED_THREAD_FACTORY = new NamedThreadFactory();
+
+    public static Thread newThread(String name, Runnable target) {
+        return NAMED_THREAD_FACTORY.newThread(name, target);
+    }
+
     public static boolean isLocalHost(String host) {
         return host == null
                 || host.length() == 0
@@ -55,71 +63,82 @@ public final class Utils {
                 || (LOCAL_IP_PATTERN.matcher(host).matches());
     }
 
-    public static String getLocalIp() {
+    public static String lookupLocalIp() {
         if (LOCAL_IP == null) {
-            LOCAL_IP = getInetAddress();
+            LOCAL_IP = getInetAddress(true);
         }
         return LOCAL_IP;
     }
 
-    /**
-     * 获取本机ip
-     * 只获取第一块网卡绑定的ip地址
-     *
-     * @return
-     */
-    public static String getInetAddress() {
+    public static NetworkInterface getLocalNetworkInterface() {
+        Enumeration<NetworkInterface> interfaces;
         try {
-            Profiler.enter("start get inet addresss");
-            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-            InetAddress address = null;
-            while (interfaces.hasMoreElements()) {
-                NetworkInterface ni = interfaces.nextElement();
-                Enumeration<InetAddress> addresses = ni.getInetAddresses();
-                while (addresses.hasMoreElements()) {
-                    address = addresses.nextElement();
-                    if (!address.isLoopbackAddress() && address.getHostAddress().indexOf(":") == -1 && address.isSiteLocalAddress()) {
-                        return address.getHostAddress();
-                    }
-                }
+            interfaces = NetworkInterface.getNetworkInterfaces();
+        } catch (SocketException e) {
+            throw new RuntimeException("NetworkInterface not found", e);
+        }
+        while (interfaces.hasMoreElements()) {
+            NetworkInterface networkInterface = interfaces.nextElement();
+            Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
+            while (addresses.hasMoreElements()) {
+                InetAddress address = addresses.nextElement();
+                if (address.isLoopbackAddress()) continue;
+                if (address.getHostAddress().contains(":")) continue;
+                if (address.isSiteLocalAddress()) return networkInterface;
             }
-            LOGGER.warn("getInetAddress is null");
-            return "127.0.0.1";
-        } catch (Throwable e) {
-            LOGGER.error("getInetAddress exception", e);
-            return "127.0.0.1";
-        } finally {
-            Profiler.release();
+        }
+        throw new RuntimeException("NetworkInterface not found");
+    }
+
+    public static InetAddress getInetAddress(String host) {
+        try {
+            return InetAddress.getByName(host);
+        } catch (UnknownHostException e) {
+            throw new IllegalArgumentException("UnknownHost " + host, e);
         }
     }
 
-    public static String getExtranetIp() {
+    /**
+     * 只获取第一块网卡绑定的ip地址
+     *
+     * @param getLocal 局域网IP
+     * @return ip
+     */
+    public static String getInetAddress(boolean getLocal) {
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                Enumeration<InetAddress> addresses = interfaces.nextElement().getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (address.isLoopbackAddress()) continue;
+                    if (address.getHostAddress().contains(":")) continue;
+                    if (getLocal) {
+                        if (address.isSiteLocalAddress()) {
+                            return address.getHostAddress();
+                        }
+                    } else {
+                        if (!address.isSiteLocalAddress() && !address.isLoopbackAddress()) {
+                            return address.getHostAddress();
+                        }
+                    }
+                }
+            }
+            LOGGER.debug("getInetAddress is null, getLocal={}", getLocal);
+            return getLocal ? "127.0.0.1" : null;
+        } catch (Throwable e) {
+            LOGGER.error("getInetAddress exception", e);
+            return getLocal ? "127.0.0.1" : null;
+        }
+    }
+
+    public static String lookupExtranetIp() {
         if (EXTRANET_IP == null) {
-            EXTRANET_IP = getExtranetAddress();
+            EXTRANET_IP = getInetAddress(false);
         }
         return EXTRANET_IP;
     }
 
-    public static String getExtranetAddress() {
-        try {
-            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-            InetAddress address = null;
-            while (interfaces.hasMoreElements()) {
-                NetworkInterface ni = interfaces.nextElement();
-                Enumeration<InetAddress> addresses = ni.getInetAddresses();
-                while (addresses.hasMoreElements()) {
-                    address = addresses.nextElement();
-                    if (!address.isLoopbackAddress() && address.getHostAddress().indexOf(":") == -1 && !address.isSiteLocalAddress()) {
-                        return address.getHostAddress();
-                    }
-                }
-            }
-            LOGGER.warn("getExtranetAddress is null");
-        } catch (Throwable e) {
-            LOGGER.error("getExtranetAddress exception", e);
-        }
-        return null;
-    }
 
     public static String headerToString(Map<String, String> headers) {
         if (headers != null && headers.size() > 0) {
@@ -166,5 +185,35 @@ public final class Utils {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    public static Map<String, Object> getPoolInfo(ThreadPoolExecutor executor) {
+        Map<String, Object> info = new HashMap<>(5);
+        info.put("corePoolSize", executor.getCorePoolSize());
+        info.put("maxPoolSize", executor.getMaximumPoolSize());
+        info.put("activeCount(workingThread)", executor.getActiveCount());
+        info.put("poolSize(workThread)", executor.getPoolSize());
+        info.put("queueSize(blockedTask)", executor.getQueue().size());
+        return info;
+    }
+
+    public static Map<String, Object> getPoolInfo(EventLoopGroup executors) {
+        Map<String, Object> info = new HashMap<>(3);
+        int poolSize = 0, queueSize = 0, activeCount = 0;
+        for (EventExecutor e : executors) {
+            poolSize++;
+            if (e instanceof SingleThreadEventLoop) {
+                SingleThreadEventLoop executor = (SingleThreadEventLoop) e;
+                queueSize += executor.pendingTasks();
+                ThreadProperties tp = executor.threadProperties();
+                if (tp.state() == Thread.State.RUNNABLE) {
+                    activeCount++;
+                }
+            }
+        }
+        info.put("poolSize(workThread)", poolSize);
+        info.put("activeCount(workingThread)", activeCount);
+        info.put("queueSize(blockedTask)", queueSize);
+        return info;
     }
 }

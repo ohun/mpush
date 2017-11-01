@@ -19,8 +19,7 @@
 
 package com.mpush.api.service;
 
-import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -41,47 +40,65 @@ public abstract class BaseService implements Service {
         return started.get();
     }
 
-    protected void tryStart(Listener listener, Function function) {
-        listener = wrap(listener);
+    protected void tryStart(Listener l, FunctionEx function) {
+        FutureListener listener = wrap(l);
         if (started.compareAndSet(false, true)) {
             try {
                 init();
                 function.apply(listener);
-                listener.onSuccess("service " + this.getClass().getSimpleName() + " start success");
+                listener.monitor(this);//主要用于异步，否则应该放置在function.apply(listener)之前
             } catch (Throwable e) {
                 listener.onFailure(e);
                 throw new ServiceException(e);
             }
         } else {
-            listener.onFailure(new ServiceException("service already started."));
+            if (throwIfStarted()) {
+                listener.onFailure(new ServiceException("service already started."));
+            } else {
+                listener.onSuccess();
+            }
         }
     }
 
-    protected void tryStop(Listener listener, Function function) {
-        listener = wrap(listener);
+    protected void tryStop(Listener l, FunctionEx function) {
+        FutureListener listener = wrap(l);
         if (started.compareAndSet(true, false)) {
             try {
                 function.apply(listener);
-                listener.onSuccess("service " + this.getClass().getSimpleName() + " stop success");
+                listener.monitor(this);//主要用于异步，否则应该放置在function.apply(listener)之前
             } catch (Throwable e) {
                 listener.onFailure(e);
                 throw new ServiceException(e);
             }
         } else {
-            listener.onFailure(new ServiceException("service already stopped."));
+            if (throwIfStopped()) {
+                listener.onFailure(new ServiceException("service already stopped."));
+            } else {
+                listener.onSuccess();
+            }
         }
     }
 
-    public final Future<Boolean> start() {
-        FutureListener listener = new FutureListener();
+    public final CompletableFuture<Boolean> start() {
+        FutureListener listener = new FutureListener(started);
         start(listener);
         return listener;
     }
 
-    public final Future<Boolean> stop() {
-        FutureListener listener = new FutureListener();
+    public final CompletableFuture<Boolean> stop() {
+        FutureListener listener = new FutureListener(started);
         stop(listener);
         return listener;
+    }
+
+    @Override
+    public final boolean syncStart() {
+        return start().join();
+    }
+
+    @Override
+    public final boolean syncStop() {
+        return stop().join();
     }
 
     @Override
@@ -94,58 +111,56 @@ public abstract class BaseService implements Service {
         tryStop(listener, this::doStop);
     }
 
-    protected abstract void doStart(Listener listener) throws Throwable;
+    protected void doStart(Listener listener) throws Throwable {
+        listener.onSuccess();
+    }
 
-    protected abstract void doStop(Listener listener) throws Throwable;
+    protected void doStop(Listener listener) throws Throwable {
+        listener.onSuccess();
+    }
 
-    protected interface Function {
+    /**
+     * 控制当服务已经启动后，重复调用start方法，是否抛出服务已经启动异常
+     * 默认是true
+     *
+     * @return true:抛出异常
+     */
+    protected boolean throwIfStarted() {
+        return true;
+    }
+
+    /**
+     * 控制当服务已经停止后，重复调用stop方法，是否抛出服务已经停止异常
+     * 默认是true
+     *
+     * @return true:抛出异常
+     */
+    protected boolean throwIfStopped() {
+        return true;
+    }
+
+    /**
+     * 服务启动停止，超时时间, 默认是10s
+     *
+     * @return 超时时间
+     */
+    protected int timeoutMillis() {
+        return 1000 * 10;
+    }
+
+    protected interface FunctionEx {
         void apply(Listener l) throws Throwable;
     }
 
     /**
      * 防止Listener被重复执行
      *
-     * @param l
-     * @return
+     * @param l listener
+     * @return FutureListener
      */
     public FutureListener wrap(Listener l) {
-        if (l == null) return new FutureListener();
+        if (l == null) return new FutureListener(started);
         if (l instanceof FutureListener) return (FutureListener) l;
-        return new FutureListener(l);
-    }
-
-    protected class FutureListener extends FutureTask<Boolean> implements Listener {
-        private final Listener l;// 防止Listener被重复执行
-
-        public FutureListener() {
-            super(BaseService.this::isRunning);
-            this.l = null;
-        }
-
-        public FutureListener(Listener l) {
-            super(BaseService.this::isRunning);
-            this.l = l;
-        }
-
-        @Override
-        public void onSuccess(Object... args) {
-            if (isDone()) return;// 防止Listener被重复执行
-            set(started.get());
-            if (l != null) l.onSuccess(args);
-        }
-
-        @Override
-        public void onFailure(Throwable cause) {
-            if (isDone()) return;// 防止Listener被重复执行
-            set(started.get());
-            setException(cause);
-            if (l != null) l.onFailure(cause);
-            throw new ServiceException(cause);
-        }
-
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            throw new UnsupportedOperationException();
-        }
+        return new FutureListener(l, started);
     }
 }

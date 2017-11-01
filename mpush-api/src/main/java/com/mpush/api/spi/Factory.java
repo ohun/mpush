@@ -19,11 +19,13 @@
 
 package com.mpush.api.spi;
 
+import java.util.function.Supplier;
+
 /**
  * Created by yxx on 2016/5/18.
  *
  * @author ohun@live.cn
  */
-public interface Factory<T> {
-    T get();
+@FunctionalInterface
+public interface Factory<T> extends Supplier<T> {
 }

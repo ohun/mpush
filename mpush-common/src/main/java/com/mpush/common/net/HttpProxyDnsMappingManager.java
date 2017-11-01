@@ -23,26 +23,35 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.mpush.api.service.BaseService;
 import com.mpush.api.service.Listener;
+import com.mpush.api.spi.Spi;
+import com.mpush.api.spi.common.ServiceDiscoveryFactory;
 import com.mpush.api.spi.net.DnsMapping;
 import com.mpush.api.spi.net.DnsMappingManager;
+import com.mpush.api.srd.ServiceDiscovery;
+import com.mpush.api.srd.ServiceListener;
+import com.mpush.api.srd.ServiceNode;
 import com.mpush.tools.Jsons;
 import com.mpush.tools.config.CC;
+import com.mpush.tools.thread.NamedPoolThreadFactory;
+import com.mpush.tools.thread.ThreadNames;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import static com.mpush.api.srd.ServiceNames.DNS_MAPPING;
 import static com.mpush.tools.Utils.checkHealth;
 
-public class HttpProxyDnsMappingManager extends BaseService implements DnsMappingManager, Runnable {
+@Spi(order = 1)
+public class HttpProxyDnsMappingManager extends BaseService implements DnsMappingManager, Runnable, ServiceListener {
     private final Logger logger = LoggerFactory.getLogger(HttpProxyDnsMappingManager.class);
 
-    public HttpProxyDnsMappingManager() {
-    }
+    protected final Map<String, List<DnsMapping>> mappings = Maps.newConcurrentMap();
 
     private final Map<String, List<DnsMapping>> all = Maps.newConcurrentMap();
     private Map<String, List<DnsMapping>> available = Maps.newConcurrentMap();
@@ -51,10 +60,17 @@ public class HttpProxyDnsMappingManager extends BaseService implements DnsMappin
 
     @Override
     protected void doStart(Listener listener) throws Throwable {
+        ServiceDiscovery discovery = ServiceDiscoveryFactory.create();
+        discovery.subscribe(DNS_MAPPING, this);
+        discovery.lookup(DNS_MAPPING).forEach(this::add);
+
         if (all.size() > 0) {
-            executorService = Executors.newSingleThreadScheduledExecutor();
+            executorService = Executors.newSingleThreadScheduledExecutor(
+                    new NamedPoolThreadFactory(ThreadNames.T_HTTP_DNS_TIMER)
+            );
             executorService.scheduleAtFixedRate(this, 1, 20, TimeUnit.SECONDS); //20秒 定时扫描dns
         }
+        listener.onSuccess();
     }
 
     @Override
@@ -62,14 +78,13 @@ public class HttpProxyDnsMappingManager extends BaseService implements DnsMappin
         if (executorService != null) {
             executorService.shutdown();
         }
+        listener.onSuccess();
     }
 
     @Override
     public void init() {
-        logger.error("start init dnsMapping");
         all.putAll(CC.mp.http.dns_mapping);
         available.putAll(CC.mp.http.dns_mapping);
-        logger.error("end init dnsMapping");
     }
 
     @Override
@@ -86,8 +101,13 @@ public class HttpProxyDnsMappingManager extends BaseService implements DnsMappin
     }
 
     public DnsMapping lookup(String origin) {
-        if (available.isEmpty()) return null;
-        List<DnsMapping> list = available.get(origin);
+        List<DnsMapping> list = mappings.get(origin);
+
+        if (list == null || list.isEmpty()) {
+            if (available.isEmpty()) return null;
+            list = available.get(origin);
+        }
+
         if (list == null || list.isEmpty()) return null;
         int L = list.size();
         if (L == 1) return list.get(0);
@@ -96,23 +116,41 @@ public class HttpProxyDnsMappingManager extends BaseService implements DnsMappin
 
     @Override
     public void run() {
-        logger.debug("start dns mapping checkHealth");
+        logger.debug("do dns mapping checkHealth ...");
         Map<String, List<DnsMapping>> all = this.getAll();
         Map<String, List<DnsMapping>> available = Maps.newConcurrentMap();
-        for (Map.Entry<String, List<DnsMapping>> entry : all.entrySet()) {
-            String key = entry.getKey();
-            List<DnsMapping> value = entry.getValue();
-            List<DnsMapping> nowValue = Lists.newArrayList();
-            for (DnsMapping temp : value) {
-                boolean isOk = checkHealth(temp.getIp(), temp.getPort());
-                if (isOk) {
-                    nowValue.add(temp);
+        all.forEach((key, dnsMappings) -> {
+            List<DnsMapping> okList = Lists.newArrayList();
+            dnsMappings.forEach(dnsMapping -> {
+                if (checkHealth(dnsMapping.getIp(), dnsMapping.getPort())) {
+                    okList.add(dnsMapping);
                 } else {
-                    logger.error("dns can not reachable:" + Jsons.toJson(temp));
+                    logger.warn("dns can not reachable:" + Jsons.toJson(dnsMapping));
                 }
-            }
-            available.put(key, nowValue);
-        }
+            });
+            available.put(key, okList);
+        });
         this.update(available);
+    }
+
+    @Override
+    public void onServiceAdded(String path, ServiceNode node) {
+        add(node);
+    }
+
+    @Override
+    public void onServiceUpdated(String path, ServiceNode node) {
+        add(node);
+    }
+
+    @Override
+    public void onServiceRemoved(String path, ServiceNode node) {
+        mappings.computeIfAbsent(node.getAttr("origin"), k -> new ArrayList<>())
+                .remove(new DnsMapping(node.getHost(), node.getPort()));
+    }
+
+    private void add(ServiceNode node){
+        mappings.computeIfAbsent(node.getAttr("origin"), k -> new ArrayList<>())
+                .add(new DnsMapping(node.getHost(), node.getPort()));
     }
 }

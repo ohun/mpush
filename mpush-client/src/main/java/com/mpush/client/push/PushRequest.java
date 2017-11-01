@@ -19,16 +19,21 @@
 
 package com.mpush.client.push;
 
-import com.mpush.api.connection.Connection;
-import com.mpush.api.push.PushSender;
+import com.mpush.api.Constants;
+import com.mpush.api.push.*;
 import com.mpush.api.router.ClientLocation;
+import com.mpush.client.MPushClient;
+import com.mpush.client.gateway.connection.GatewayConnectionFactory;
 import com.mpush.common.message.gateway.GatewayPushMessage;
-import com.mpush.common.router.ConnectionRouterManager;
+import com.mpush.common.push.GatewayPushResult;
+import com.mpush.common.router.CachedRemoteRouterManager;
 import com.mpush.common.router.RemoteRouter;
+import com.mpush.tools.Jsons;
 import com.mpush.tools.common.TimeLine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
@@ -40,94 +45,114 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * @author ohun@live.cn
  */
-public class PushRequest extends FutureTask<Boolean> {
+public final class PushRequest extends FutureTask<PushResult> {
     private static final Logger LOGGER = LoggerFactory.getLogger(PushRequest.class);
 
-    private static final Callable<Boolean> NONE = () -> Boolean.FALSE;
+    private static final Callable<PushResult> NONE = () -> new PushResult(PushResult.CODE_FAILURE);
 
     private enum Status {init, success, failure, offline, timeout}
 
     private final AtomicReference<Status> status = new AtomicReference<>(Status.init);
     private final TimeLine timeLine = new TimeLine("Push-Time-Line");
 
-    private final PushClient client;
+    private final MPushClient mPushClient;
 
-    private PushSender.Callback callback;
+    private AckModel ackModel;
+    private Set<String> tags;
+    private String condition;
+    private PushCallback callback;
     private String userId;
     private byte[] content;
-    private long timeout;
+    private int timeout;
     private ClientLocation location;
+    private int sessionId;
+    private String taskId;
     private Future<?> future;
+    private PushResult result;
 
-    private void sendToConnServer(RemoteRouter router) {
+    private void sendToConnServer(RemoteRouter remoteRouter) {
         timeLine.addTimePoint("lookup-remote");
 
-        if (router == null) {
+        if (remoteRouter != null) {
+            location = remoteRouter.getRouteValue();
+        }
+
+        if (remoteRouter == null || remoteRouter.isOffline()) {
             //1.1没有查到说明用户已经下线
             offline();
             return;
         }
 
-        timeLine.addTimePoint("get-gateway-conn");
-
-
+        timeLine.addTimePoint("check-gateway-conn");
         //2.通过网关连接，把消息发送到所在机器
-        location = router.getRouteValue();
-        Connection gatewayConn = client.getGatewayConnection(location.getHost());
-        if (gatewayConn == null) {
+        boolean success = mPushClient.getGatewayConnectionFactory().send(
+                location.getHostAndPort(),
+                connection -> GatewayPushMessage
+                        .build(connection)
+                        .setUserId(userId)
+                        .setContent(content)
+                        .setClientType(location.getClientType())
+                        .setTimeout(timeout - 500)
+                        .setTags(tags)
+                        .addFlag(ackModel.flag)
+                ,
+                pushMessage -> {
+                    timeLine.addTimePoint("send-to-gateway-begin");
+                    pushMessage.sendRaw(f -> {
+                        timeLine.addTimePoint("send-to-gateway-end");
+                        if (f.isSuccess()) {
+                            LOGGER.debug("send to gateway server success, location={}, conn={}", location, f.channel());
+                        } else {
+                            LOGGER.error("send to gateway server failure, location={}, conn={}", location, f.channel(), f.cause());
+                            failure();
+                        }
+                    });
+                    PushRequest.this.content = null;//释放内存
+                    sessionId = pushMessage.getSessionId();
+                    future = mPushClient.getPushRequestBus().put(sessionId, PushRequest.this);
+                }
+        );
+
+        if (!success) {
             LOGGER.error("get gateway connection failure, location={}", location);
             failure();
-            return;
         }
-
-        timeLine.addTimePoint("send-to-gateway-begin");
-
-        GatewayPushMessage pushMessage = new GatewayPushMessage(userId, location.getClientType(), content, gatewayConn);
-        timeLine.addTimePoint("put-request-bus");
-        future = PushRequestBus.I.put(pushMessage.getSessionId(), this);
-
-        pushMessage.sendRaw(f -> {
-            timeLine.addTimePoint("send-to-gateway-end");
-            if (f.isSuccess()) {
-            } else {
-                failure();
-            }
-        });
     }
 
     private void submit(Status status) {
         if (this.status.compareAndSet(Status.init, status)) {//防止重复调用
-            if (future != null) future.cancel(true);
-            if (callback != null) {
-                PushRequestBus.I.asyncCall(this);
-            } else {
-                LOGGER.warn("callback is null");
+            boolean isTimeoutEnd = status == Status.timeout;//任务是否超时结束
+
+            if (future != null && !isTimeoutEnd) {//是超时结束任务不用再取消一次
+                future.cancel(true);//取消超时任务
             }
-            super.set(this.status.get() == Status.success);
+
+            this.timeLine.end();//结束时间流统计
+            super.set(getResult());//设置同步调用的返回结果
+
+            if (callback != null) {//回调callback
+                if (isTimeoutEnd) {//超时结束时，当前线程已经是线程池里的线程，直接调用callback
+                    callback.onResult(getResult());
+                } else {//非超时结束时，当前线程为Netty线程池，要异步执行callback
+                    mPushClient.getPushRequestBus().asyncCall(this);//会执行run方法
+                }
+            }
         }
-        timeLine.end();
-        LOGGER.info("push request {} end, userId={}, content={}, location={}, timeLine={}"
-                , status, userId, content, location, timeLine);
+        LOGGER.info("push request {} end, {}, {}, {}", status, userId, location, timeLine);
     }
 
+    /**
+     * run方法会有两个地方的线程调用
+     * 1. 任务超时时会调用，见PushRequestBus.I.put(sessionId, PushRequest.this);
+     * 2. 异步执行callback的时候，见PushRequestBus.I.asyncCall(this);
+     */
     @Override
     public void run() {
-        switch (status.get()) {
-            case success:
-                callback.onSuccess(userId, location);
-                break;
-            case failure:
-                callback.onFailure(userId, location);
-                break;
-            case offline:
-                callback.onOffline(userId, location);
-                break;
-            case timeout:
-                callback.onTimeout(userId, location);
-                break;
-            case init://从定时任务过来的，超时时间到了
-                submit(Status.timeout);
-                break;
+        //判断任务是否超时，如果超时了此时状态是init，否则应该是其他状态, 因为从submit方法过来的状态都不是init
+        if (status.get() == Status.init) {
+            timeout();
+        } else {
+            callback.onResult(getResult());
         }
     }
 
@@ -136,54 +161,139 @@ public class PushRequest extends FutureTask<Boolean> {
         throw new UnsupportedOperationException();
     }
 
-    public FutureTask<Boolean> send(RemoteRouter router) {
+    public FutureTask<PushResult> send(RemoteRouter router) {
         timeLine.begin();
         sendToConnServer(router);
         return this;
     }
 
-    public void redirect() {
-        timeLine.addTimePoint("redirect");
-        LOGGER.warn("user route has changed, userId={}, location={}", userId, location);
-        ConnectionRouterManager.I.invalidateLocalCache(userId);
-        if (status.get() == Status.init) {//表示任务还没有完成，还可以重新发送
-            RemoteRouter route = ConnectionRouterManager.I.lookup(userId, location.getClientType());
-            send(route);
-        }
-    }
+    public FutureTask<PushResult> broadcast() {
+        timeLine.begin();
 
-    public FutureTask<Boolean> offline() {
-        ConnectionRouterManager.I.invalidateLocalCache(userId);
-        submit(Status.offline);
+        boolean success = mPushClient.getGatewayConnectionFactory().broadcast(
+                connection -> GatewayPushMessage
+                        .build(connection)
+                        .setUserId(userId)
+                        .setContent(content)
+                        .setTags(tags)
+                        .setCondition(condition)
+                        .setTaskId(taskId)
+                        .addFlag(ackModel.flag),
+
+                pushMessage -> {
+                    pushMessage.sendRaw(f -> {
+                        if (f.isSuccess()) {
+                            LOGGER.debug("send broadcast to gateway server success, userId={}, conn={}", userId, f.channel());
+                        } else {
+                            failure();
+                            LOGGER.error("send broadcast to gateway server failure, userId={}, conn={}", userId, f.channel(), f.cause());
+                        }
+                    });
+
+                    if (pushMessage.taskId == null) {
+                        sessionId = pushMessage.getSessionId();
+                        future = mPushClient.getPushRequestBus().put(sessionId, PushRequest.this);
+                    } else {
+                        success();
+                    }
+                }
+        );
+
+        if (!success) {
+            LOGGER.error("get gateway connection failure when broadcast.");
+            failure();
+        }
+
         return this;
     }
 
-    public void timeout() {
-        submit(Status.timeout);
+    private void offline() {
+        mPushClient.getCachedRemoteRouterManager().invalidateLocalCache(userId);
+        submit(Status.offline);
     }
 
-    public void success() {
+    private void timeout() {
+        if (mPushClient.getPushRequestBus().getAndRemove(sessionId) != null) {
+            submit(Status.timeout);
+        }
+    }
+
+    private void success() {
         submit(Status.success);
     }
 
-    public void failure() {
+    private void failure() {
         submit(Status.failure);
+    }
+
+    public void onFailure() {
+        failure();
+    }
+
+    public void onRedirect() {
+        timeLine.addTimePoint("redirect");
+        LOGGER.warn("user route has changed, userId={}, location={}", userId, location);
+        mPushClient.getCachedRemoteRouterManager().invalidateLocalCache(userId);
+        if (status.get() == Status.init) {//表示任务还没有完成，还可以重新发送
+            RemoteRouter remoteRouter = mPushClient.getCachedRemoteRouterManager().lookup(userId, location.getClientType());
+            send(remoteRouter);
+        }
+    }
+
+    public FutureTask<PushResult> onOffline() {
+        offline();
+        return this;
+    }
+
+    public void onSuccess(GatewayPushResult result) {
+        if (result != null) timeLine.addTimePoints(result.timePoints);
+        submit(Status.success);
     }
 
     public long getTimeout() {
         return timeout;
     }
 
-    public PushRequest(PushClient client) {
+    public PushRequest(MPushClient mPushClient) {
         super(NONE);
-        this.client = client;
+        this.mPushClient = mPushClient;
     }
 
-    public static PushRequest build(PushClient client) {
-        return new PushRequest(client);
+    public static PushRequest build(MPushClient mPushClient, PushContext ctx) {
+        byte[] content = ctx.getContext();
+        PushMsg msg = ctx.getPushMsg();
+        if (msg != null) {
+            String json = Jsons.toJson(msg);
+            if (json != null) {
+                content = json.getBytes(Constants.UTF_8);
+            }
+        }
+
+        Objects.requireNonNull(content, "push content can not be null.");
+
+        return new PushRequest(mPushClient)
+                .setAckModel(ctx.getAckModel())
+                .setUserId(ctx.getUserId())
+                .setTags(ctx.getTags())
+                .setCondition(ctx.getCondition())
+                .setTaskId(ctx.getTaskId())
+                .setContent(content)
+                .setTimeout(ctx.getTimeout())
+                .setCallback(ctx.getCallback());
+
     }
 
-    public PushRequest setCallback(PushSender.Callback callback) {
+    private PushResult getResult() {
+        if (result == null) {
+            result = new PushResult(status.get().ordinal())
+                    .setUserId(userId)
+                    .setLocation(location)
+                    .setTimeLine(timeLine.getTimePoints());
+        }
+        return result;
+    }
+
+    public PushRequest setCallback(PushCallback callback) {
         this.callback = callback;
         return this;
     }
@@ -198,15 +308,35 @@ public class PushRequest extends FutureTask<Boolean> {
         return this;
     }
 
-    public PushRequest setTimeout(long timeout) {
+    public PushRequest setTimeout(int timeout) {
         this.timeout = timeout;
+        return this;
+    }
+
+    public PushRequest setAckModel(AckModel ackModel) {
+        this.ackModel = ackModel;
+        return this;
+    }
+
+    public PushRequest setTags(Set<String> tags) {
+        this.tags = tags;
+        return this;
+    }
+
+    public PushRequest setCondition(String condition) {
+        this.condition = condition;
+        return this;
+    }
+
+    public PushRequest setTaskId(String taskId) {
+        this.taskId = taskId;
         return this;
     }
 
     @Override
     public String toString() {
         return "PushRequest{" +
-                "content='" + content + '\'' +
+                "content='" + (content == null ? -1 : content.length) + '\'' +
                 ", userId='" + userId + '\'' +
                 ", timeout=" + timeout +
                 ", location=" + location +

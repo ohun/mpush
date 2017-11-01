@@ -20,58 +20,85 @@
 package com.mpush.bootstrap;
 
 
-import com.mpush.api.service.Server;
+import com.mpush.api.common.ServerEventListener;
+import com.mpush.api.spi.core.ServerEventListenerFactory;
 import com.mpush.bootstrap.job.*;
-import com.mpush.core.server.AdminServer;
-import com.mpush.core.server.ConnectionServer;
-import com.mpush.core.server.GatewayServer;
-import com.mpush.monitor.service.MonitorService;
+import com.mpush.core.MPushServer;
 import com.mpush.tools.config.CC;
-import com.mpush.zk.ZKClient;
-import com.mpush.zk.node.ZKServerNode;
+
+import static com.mpush.tools.config.CC.mp.net.*;
 
 /**
  * Created by yxx on 2016/5/14.
  *
  * @author ohun@live.cn
  */
-public class ServerLauncher {
-    private final ZKServerNode csNode = ZKServerNode.csNode();
+public final class ServerLauncher {
 
-    private final ZKServerNode gsNode = ZKServerNode.gsNode();
+    private MPushServer mPushServer;
+    private BootChain chain;
+    private ServerEventListener serverEventListener;
 
-    private final ConnectionServer connectServer = new ConnectionServer(csNode.getPort());
+    public void init() {
+        if (mPushServer == null) {
+            mPushServer = new MPushServer();
+        }
 
-    private final GatewayServer gatewayServer = new GatewayServer(gsNode.getPort());
+        if (chain == null) {
+            chain = BootChain.chain();
+        }
 
-    private final AdminServer adminServer = new AdminServer(CC.mp.net.admin_server_port, connectServer, gatewayServer);
+        if (serverEventListener == null) {
+            serverEventListener = ServerEventListenerFactory.create();
+        }
 
+        serverEventListener.init(mPushServer);
+
+        chain.boot()
+                .setNext(new CacheManagerBoot())//1.初始化缓存模块
+                .setNext(new ServiceRegistryBoot())//2.启动服务注册与发现模块
+                .setNext(new ServiceDiscoveryBoot())//2.启动服务注册与发现模块
+                .setNext(new ServerBoot(mPushServer.getConnectionServer(), mPushServer.getConnServerNode()))//3.启动接入服务
+                .setNext(() -> new ServerBoot(mPushServer.getWebsocketServer(), mPushServer.getWebsocketServerNode()), wsEnabled())//4.启动websocket接入服务
+                .setNext(() -> new ServerBoot(mPushServer.getUdpGatewayServer(), mPushServer.getGatewayServerNode()), udpGateway())//5.启动udp网关服务
+                .setNext(() -> new ServerBoot(mPushServer.getGatewayServer(), mPushServer.getGatewayServerNode()), tcpGateway())//6.启动tcp网关服务
+                .setNext(new ServerBoot(mPushServer.getAdminServer(), null))//7.启动控制台服务
+                .setNext(new RouterCenterBoot(mPushServer))//8.启动路由中心组件
+                .setNext(new PushCenterBoot(mPushServer))//9.启动推送中心组件
+                .setNext(() -> new HttpProxyBoot(mPushServer), CC.mp.http.proxy_enabled)//10.启动http代理服务，dns解析服务
+                .setNext(new MonitorBoot(mPushServer))//11.启动监控服务
+                .end();
+    }
 
     public void start() {
-        BootChain chain = BootChain.chain();
-        chain.boot()
-                .setNext(new ZKBoot())//1.启动ZK节点数据变化监听
-                .setNext(new RedisBoot())//2.注册redis sever 到ZK
-                .setNext(new ServerBoot(connectServer, csNode))//3.启动长连接服务
-                .setNext(new ServerBoot(gatewayServer, gsNode))//4.启动网关服务
-                .setNext(new ServerBoot(adminServer, null))//5.启动控制台服务
-                .setNext(new HttpProxyBoot())//6.启动http代理服务，解析dns
-                .setNext(new MonitorBoot())//7.启动监控
-                .setNext(new LastBoot());//8.启动结束
-        chain.run();
+        chain.start();
     }
 
     public void stop() {
-        stopServer(connectServer);
-        stopServer(gatewayServer);
-        stopServer(adminServer);
-        ZKClient.I.stop();
-        MonitorService.I.stop();
+        chain.stop();
     }
 
-    private void stopServer(Server server) {
-        if (server != null) {
-            server.stop(null);
-        }
+    public void setMPushServer(MPushServer mPushServer) {
+        this.mPushServer = mPushServer;
+    }
+
+    public void setChain(BootChain chain) {
+        this.chain = chain;
+    }
+
+    public MPushServer getMPushServer() {
+        return mPushServer;
+    }
+
+    public BootChain getChain() {
+        return chain;
+    }
+
+    public ServerEventListener getServerEventListener() {
+        return serverEventListener;
+    }
+
+    public void setServerEventListener(ServerEventListener serverEventListener) {
+        this.serverEventListener = serverEventListener;
     }
 }

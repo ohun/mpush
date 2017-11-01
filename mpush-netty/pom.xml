@@ -2,26 +2,25 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <parent>
-        <artifactId>mpush</artifactId>
-        <groupId>com.mpush</groupId>
-        <version>1.0</version>
-    </parent>
+
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>${mpush.groupId}</groupId>
+    <parent>
+        <artifactId>mpush</artifactId>
+        <groupId>com.github.mpusher</groupId>
+        <version>0.8.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
     <artifactId>mpush-netty</artifactId>
-    <version>${mpush-netty-version}</version>
     <packaging>jar</packaging>
     <name>mpush-netty</name>
+    <description>MPUSH消息推送系统Netty模块</description>
+    <url>https://github.com/mpusher/mpush</url>
 
     <dependencies>
         <dependency>
-            <groupId>${mpush.groupId}</groupId>
-            <artifactId>mpush-api</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>${mpush.groupId}</groupId>
+            <groupId>${project.groupId}</groupId>
             <artifactId>mpush-tools</artifactId>
         </dependency>
         <dependency>
@@ -44,6 +43,14 @@
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-udt</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-sctp</artifactId>
         </dependency>
     </dependencies>
 </project>

@@ -21,17 +21,16 @@ package com.mpush.client.connect;
 
 import com.google.common.eventbus.Subscribe;
 import com.mpush.api.event.ConnectionCloseEvent;
-import com.mpush.netty.client.NettyClient;
+import com.mpush.netty.client.NettyTCPClient;
 import com.mpush.tools.event.EventBus;
 import io.netty.channel.ChannelHandler;
 
-public class ConnectClient extends NettyClient {
+public class ConnectClient extends NettyTCPClient {
     private final ConnClientChannelHandler handler;
 
     public ConnectClient(String host, int port, ClientConfig config) {
-        super(host, port);
         handler = new ConnClientChannelHandler(config);
-        EventBus.I.register(this);
+        EventBus.register(this);
     }
 
     @Override
@@ -44,4 +43,8 @@ public class ConnectClient extends NettyClient {
         this.stop();
     }
 
+    @Override
+    protected int getWorkThreadNum() {
+        return 1;
+    }
 }
